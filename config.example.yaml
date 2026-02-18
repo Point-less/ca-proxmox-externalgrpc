@@ -1,0 +1,48 @@
+proxmox:
+  api_url: "https://proxmox.example:8006"
+  node: "pve"
+  token_id: "root@pam!cluster-autoscaler"
+  token_secret: "<set-me>"
+  tls_insecure: true
+  verify_certificates: false
+  import_storage: "local"
+  iso_storage: "local"
+  vm_storage: "local-lvm"
+  bridge: "vmbr0"
+  cloud_image_url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+
+k3s:
+  version: "v1.34.4+k3s1"
+  server_url: "https://10.5.1.80:6443"
+  cluster_token: "<set-me>"
+  ssh_public_key: "ssh-ed25519 AAAA..."
+
+defaults:
+  vm_tag_prefix: "proxmox_test2"
+
+node_groups:
+  - id: "general"
+    vm_name_prefix: "ca-general"
+    min_size: 0
+    max_size: 8
+    cores: 2
+    memory_mb: 4096
+    balloon_mb: 2048
+    disk_size: "20G"
+    labels:
+      - "autoscaled=true"
+      - "workload-tier=general"
+    taints: []
+
+  - id: "gitea-runners"
+    vm_name_prefix: "ca-gitea"
+    min_size: 0
+    max_size: 4
+    cores: 2
+    memory_mb: 4096
+    balloon_mb: 2048
+    disk_size: "20G"
+    labels:
+      - "autoscaled=true"
+      - "workload-tier=gitea-runner"
+    taints: []

@@ -1,0 +1,7 @@
+grpcio==1.78.0
+grpcio-tools==1.78.0
+protobuf==6.33.0
+requests==2.32.5
+PyYAML==6.0.3
+Jinja2==3.1.6
+pycdlib==1.14.0

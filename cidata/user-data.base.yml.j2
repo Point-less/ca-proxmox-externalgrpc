@@ -1,0 +1,82 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - cloud-guest-utils
+  - curl
+  - python3
+  - qemu-guest-agent
+  - sudo
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [adm, sudo]
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - {{ ssh_public_key }}
+
+write_files:
+{% if registries_yaml %}
+  - path: /etc/rancher/k3s/registries.yaml
+    permissions: "0644"
+    content: |
+{{ registries_yaml | indent(6, true) }}
+{% endif %}
+{% block role_write_files %}{% endblock %}
+  - path: /usr/local/bin/proxmox-test2-bootstrap.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      K3S_VERSION="{{ k3s_version }}"
+      CLUSTER_TOKEN="{{ cluster_token }}"
+      SERVER_URL="{{ server_url | default('') }}"
+
+      configure_cluster_dns() {
+        # Best effort: make cluster.local resolve to CoreDNS from the node host OS.
+        mkdir -p /etc/systemd/resolved.conf.d || true
+        printf '%s\n' \
+          '[Resolve]' \
+          'DNS=10.43.0.10' \
+          'Domains=~cluster.local' \
+          >/etc/systemd/resolved.conf.d/k3s-coredns.conf || true
+        systemctl restart systemd-resolved || true
+      }
+
+      # Basic hygiene for k3s.
+      swapoff -a || true
+      sed -ri '/\\sswap\\s/s/^#?/#/' /etc/fstab || true
+      test -e /dev/kmsg || ln -s /dev/console /dev/kmsg || true
+
+      systemctl enable --now qemu-guest-agent || true
+
+      if command -v k3s >/dev/null 2>&1; then
+        configure_cluster_dns
+        exit 0
+      fi
+
+      # Ensure root FS has room (Proxmox disk resize happens on the host; grow partition+fs in-guest).
+      ROOT_DEV="$(findmnt -n -o SOURCE /)"
+      if [[ -b "${ROOT_DEV}" ]]; then
+        DISK="/dev/$(lsblk -no PKNAME "${ROOT_DEV}" || true)"
+        PARTNUM="$(lsblk -no PARTNUM "${ROOT_DEV}" || true)"
+        if [[ -b "${DISK}" && -n "${PARTNUM}" ]]; then
+          growpart "${DISK}" "${PARTNUM}" || true
+          resize2fs "${ROOT_DEV}" || true
+        fi
+      fi
+
+      # Determine primary IPv4 for node-ip / tls-san.
+      NODE_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || true)"
+      if [[ -z "${NODE_IP}" ]]; then
+        NODE_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+      fi
+
+{% block role_install %}{% endblock %}
+      configure_cluster_dns
+
+runcmd:
+  - [ sh, -lc, "/usr/local/bin/proxmox-test2-bootstrap.sh" ]

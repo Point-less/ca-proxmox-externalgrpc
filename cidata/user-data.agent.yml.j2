@@ -1,0 +1,28 @@
+{% extends "user-data.base.yml.j2" %}
+
+{% block role_install %}
+      if [[ -z "${SERVER_URL}" ]]; then
+        echo "SERVER_URL is required for agent role" >&2
+        exit 1
+      fi
+
+      # Wait for server port to open (avoid flapping in early boot).
+      host="$(echo "${SERVER_URL}" | sed -E 's#^https?://##; s#:.*$##')"
+      for _i in $(seq 1 180); do
+        (echo >"/dev/tcp/${host}/6443") >/dev/null 2>&1 && break
+        sleep 5
+      done
+
+      curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="${K3S_VERSION}" \
+        K3S_URL="${SERVER_URL}" \
+        K3S_TOKEN="${CLUSTER_TOKEN}" \
+        sh -s - agent \
+{%- for lbl in node_labels %}
+        --node-label '{{ lbl }}' \
+{%- endfor %}
+{%- for t in node_taints %}
+        --node-taint '{{ t }}' \
+{%- endfor %}
+        ${NODE_IP:+--node-ip "${NODE_IP}"}
+{% endblock %}

@@ -1,0 +1,99 @@
+# Proxmox External gRPC Provider (Cluster Autoscaler)
+
+Minimal Python implementation of Cluster Autoscaler's `externalgrpc` cloud provider.
+
+## Model
+
+- No CAPI / CAPMOX.
+- No VM templates required for autoscaled nodes.
+- Each scale-up creates a VM from a remote cloud image URL (`import-from` flow).
+- Each VM gets a generated cloud-init ISO (`meta-data` + `user-data`) with k3s join logic.
+
+## What it does
+
+- Implements required gRPC methods used by Cluster Autoscaler:
+  - `NodeGroups`
+  - `NodeGroupForNode`
+  - `NodeGroupTargetSize`
+  - `NodeGroupIncreaseSize`
+  - `NodeGroupDeleteNodes`
+  - `NodeGroupDecreaseTargetSize`
+  - `NodeGroupNodes`
+  - `Refresh`, `Cleanup`
+- Adds node identity labels during join:
+  - `autoscaler.proxmox/group=<group-id>`
+  - `autoscaler.proxmox/vmid=<vmid>`
+
+## Build
+
+```bash
+docker build -t proxmox-ca-externalgrpc:dev source/ca-proxmox-externalgrpc
+```
+
+The image build generates gRPC python files from `externalgrpc.proto`.
+
+## Local Dev
+
+Regenerate protobuf stubs:
+
+```bash
+python scripts/generate-proto.py
+```
+
+For toolbox-based local testing, use a virtualenv:
+
+```bash
+python3 -m venv /tmp/ca-proxmox-extgrpc-venv
+. /tmp/ca-proxmox-extgrpc-venv/bin/activate
+pip install -r requirements.txt
+python scripts/generate-proto.py
+```
+
+Run tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Code Layout
+
+- `server.py`: thin entrypoint (arg parsing, logging, gRPC server bootstrap)
+- `provider.py`: CloudProvider gRPC implementation
+- `pve.py`: Proxmox API client and VM lifecycle operations
+- `settings.py`: config loading + env override logic
+- `seed.py`: cloud-init rendering and seed ISO creation
+- `utils.py`: shared parsing/protobuf helpers
+- `models.py`: dataclasses for settings and VM/group state
+- `proto_stubs.py`: guarded import of generated protobuf modules
+- `scripts/generate-proto.py`: protobuf generation script
+- `tests/`: focused unit tests around provider behavior
+
+Generated files `externalgrpc_pb2.py` and `externalgrpc_pb2_grpc.py` are intentionally not tracked in git.
+
+## Config
+
+Use `config.example.yaml` as a base.
+
+Required inputs:
+- Proxmox API token credentials
+- `CLOUD_IMAGE_URL`
+- k3s server URL + cluster token + SSH public key
+- at least one `node_group`
+
+Environment variables can override key settings:
+- `PM_API_URL`, `PM_NODE`, `PM_SERVICE_TOKEN_ID`, `PM_SERVICE_TOKEN_SECRET`
+- `PM_TLS_INSECURE`, `PM_VERIFY_CERTIFICATES`
+- `IMPORT_STORAGE`, `ISO_STORAGE`, `VM_STORAGE`, `BRIDGE`, `CLOUD_IMAGE_URL`
+- `K3S_VERSION`, `K3S_SERVER_URL`, `K3S_CLUSTER_TOKEN`, `SSH_PUBLIC_KEY`
+
+## Run
+
+```bash
+python server.py --config /config/provider-config.yaml --port 50051
+```
+
+## Notes
+
+- This implementation is intentionally minimal.
+- It uses VM tags to map nodes to autoscaler groups (`ca-group-<group-id>`).
+- For reliable node mapping, keep hostnames unique and deterministic.
