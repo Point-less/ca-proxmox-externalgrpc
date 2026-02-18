@@ -7,7 +7,7 @@ from pathlib import Path
 import pycdlib
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from models import K3sConfig
+from .models import K3sConfig
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -59,4 +59,3 @@ def make_cidata_iso_bytes(*, meta_data: str, user_data: str) -> bytes:
 def seed_iso_name(*, vm_name: str, meta: str, user: str) -> str:
     digest = hashlib.sha256((meta + "\n" + user).encode("utf-8")).hexdigest()[:12]
     return f"seed-{vm_name}-{digest}.iso"
-

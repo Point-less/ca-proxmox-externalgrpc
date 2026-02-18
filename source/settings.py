@@ -6,8 +6,8 @@ from typing import Any
 
 import yaml
 
-from models import GroupConfig, K3sConfig, ProxmoxConfig, Settings
-from utils import as_bool, normalize_pm_api_base, read_optional
+from .models import GroupConfig, K3sConfig, ProxmoxConfig, Settings
+from .utils import as_bool, normalize_pm_api_base, read_optional
 
 
 def load_settings(config_path: Path) -> Settings:
@@ -88,4 +88,3 @@ def load_settings(config_path: Path) -> Settings:
     if not settings.groups:
         raise SystemExit("No node_groups configured")
     return settings
-

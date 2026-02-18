@@ -27,17 +27,17 @@ Minimal Python implementation of Cluster Autoscaler's `externalgrpc` cloud provi
 ## Build
 
 ```bash
-docker build -t proxmox-ca-externalgrpc:dev source/ca-proxmox-externalgrpc
+docker build -t proxmox-ca-externalgrpc:dev .
 ```
 
-The image build generates gRPC python files from `externalgrpc.proto`.
+The image build generates gRPC python files from `source/externalgrpc.proto`.
 
 ## Local Dev
 
 Regenerate protobuf stubs:
 
 ```bash
-python scripts/generate-proto.py
+python source/scripts/generate-proto.py
 ```
 
 For toolbox-based local testing, use a virtualenv:
@@ -46,29 +46,29 @@ For toolbox-based local testing, use a virtualenv:
 python3 -m venv /tmp/ca-proxmox-extgrpc-venv
 . /tmp/ca-proxmox-extgrpc-venv/bin/activate
 pip install -r requirements.txt
-python scripts/generate-proto.py
+python source/scripts/generate-proto.py
 ```
 
 Run tests:
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s source/tests -v
 ```
 
 ## Code Layout
 
-- `server.py`: thin entrypoint (arg parsing, logging, gRPC server bootstrap)
-- `provider.py`: CloudProvider gRPC implementation
-- `pve.py`: Proxmox API client and VM lifecycle operations
-- `settings.py`: config loading + env override logic
-- `seed.py`: cloud-init rendering and seed ISO creation
-- `utils.py`: shared parsing/protobuf helpers
-- `models.py`: dataclasses for settings and VM/group state
-- `proto_stubs.py`: guarded import of generated protobuf modules
-- `scripts/generate-proto.py`: protobuf generation script
-- `tests/`: focused unit tests around provider behavior
+- `source/server.py`: thin entrypoint (arg parsing, logging, gRPC server bootstrap)
+- `source/provider.py`: CloudProvider gRPC implementation
+- `source/pve.py`: Proxmox API client and VM lifecycle operations
+- `source/settings.py`: config loading + env override logic
+- `source/seed.py`: cloud-init rendering and seed ISO creation
+- `source/utils.py`: shared parsing/protobuf helpers
+- `source/models.py`: dataclasses for settings and VM/group state
+- `source/proto_stubs.py`: guarded import of generated protobuf modules
+- `source/scripts/generate-proto.py`: protobuf generation script
+- `source/tests/`: focused unit tests around provider behavior
 
-Generated files `externalgrpc_pb2.py` and `externalgrpc_pb2_grpc.py` are intentionally not tracked in git.
+Generated files `source/externalgrpc_pb2.py` and `source/externalgrpc_pb2_grpc.py` are intentionally not tracked in git.
 
 ## Config
 
@@ -89,7 +89,7 @@ Environment variables can override key settings:
 ## Run
 
 ```bash
-python server.py --config /config/provider-config.yaml --port 50051
+python -m source.server --config /config/provider-config.yaml --port 50051
 ```
 
 ## Notes

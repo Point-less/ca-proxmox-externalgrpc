@@ -11,11 +11,11 @@ from typing import Any
 import grpc
 import requests
 
-from models import GroupConfig, Settings, VMInfo
-from proto_stubs import pb, pb_grpc
-from pve import PveClient
-from seed import make_cidata_iso_bytes, render_seed, seed_iso_name
-from utils import parse_tags, unwrap_k8s_protobuf, vmid_from_provider_id
+from .models import GroupConfig, Settings, VMInfo
+from .proto_stubs import pb, pb_grpc
+from .pve import PveClient
+from .seed import make_cidata_iso_bytes, render_seed, seed_iso_name
+from .utils import parse_tags, unwrap_k8s_protobuf, vmid_from_provider_id
 
 LOG = logging.getLogger("proxmox-ca-externalgrpc")
 SA_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
@@ -529,4 +529,3 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
     ) -> pb.NodeGroupAutoscalingOptionsResponse:
         _ = self._group(request.id, context)
         return pb.NodeGroupAutoscalingOptionsResponse(nodeGroupAutoscalingOptions=request.defaults)
-

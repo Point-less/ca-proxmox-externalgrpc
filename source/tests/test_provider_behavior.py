@@ -6,14 +6,14 @@ import threading
 import unittest
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))
-subprocess.run([sys.executable, str(BASE_DIR / "scripts" / "generate-proto.py")], check=True)
+subprocess.run([sys.executable, str(BASE_DIR / "source" / "scripts" / "generate-proto.py")], check=True)
 
-import externalgrpc_pb2 as pb  # noqa: E402
-from models import GroupConfig, K3sConfig, ProxmoxConfig, Settings, VMInfo  # noqa: E402
-from provider import CloudProvider  # noqa: E402
-from utils import parse_tags  # noqa: E402
+from source import externalgrpc_pb2 as pb  # noqa: E402
+from source.models import GroupConfig, K3sConfig, ProxmoxConfig, Settings, VMInfo  # noqa: E402
+from source.provider import CloudProvider  # noqa: E402
+from source.utils import parse_tags  # noqa: E402
 
 
 class _DummyContext:

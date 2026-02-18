@@ -11,7 +11,7 @@ from typing import Any
 import requests
 import urllib3
 
-from models import ProxmoxConfig
+from .models import ProxmoxConfig
 
 LOG = logging.getLogger("proxmox-ca-externalgrpc")
 
@@ -196,4 +196,3 @@ class PveClient:
             params={"purge": "1", "destroy-unreferenced-disks": "1"},
         )
         self._wait_upid(delete_upid)
-

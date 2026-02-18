@@ -9,9 +9,9 @@ from pathlib import Path
 
 import grpc
 
-from proto_stubs import pb_grpc
-from provider import CloudProvider
-from settings import load_settings
+from .proto_stubs import pb_grpc
+from .provider import CloudProvider
+from .settings import load_settings
 
 
 def serve(*, config_path: Path, bind: str, port: int) -> None:
@@ -42,4 +42,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -8,19 +8,20 @@ from grpc_tools import protoc
 
 
 def main() -> int:
-    base_dir = Path(__file__).resolve().parents[1]
+    base_dir = Path(__file__).resolve().parents[2]
+    source_dir = base_dir / "source"
     include_dir = Path(grpc_tools.__file__).resolve().parent / "_proto"
-    proto = base_dir / "externalgrpc.proto"
+    proto = source_dir / "externalgrpc.proto"
     if not proto.exists():
         raise SystemExit(f"missing proto file: {proto}")
 
     rc = protoc.main(
         [
             "grpc_tools.protoc",
-            f"-I{base_dir}",
+            f"-I{source_dir}",
             f"-I{include_dir}",
-            f"--python_out={base_dir}",
-            f"--grpc_python_out={base_dir}",
+            f"--python_out={source_dir}",
+            f"--grpc_python_out={source_dir}",
             str(proto),
         ]
     )
