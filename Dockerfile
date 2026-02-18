@@ -8,7 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY source/ /app/
 RUN python /app/scripts/generate-proto.py
 
-ENV PROVIDER_CONFIG=/config/provider-config.yaml
 EXPOSE 50051
 
 CMD ["python", "-m", "app.server"]
