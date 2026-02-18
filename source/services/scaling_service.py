@@ -6,7 +6,13 @@ from typing import Iterable
 from core.contracts import StateRepository
 from core.errors import FailedPreconditionError, InvalidArgumentError, NotFoundError
 from core.models import GroupConfig, Settings, VMInfo
-from core.vm_state_machine import EVENT_REQUEST_DELETE, STATE_DELETING_VM, STATE_PENDING, transition_state
+from core.vm_state_machine import (
+    EVENT_REQUEST_DELETE,
+    STATE_DELETING_VM,
+    STATE_PENDING,
+    is_lifecycle_state,
+    transition_state,
+)
 from .group_context import (
     GroupContext,
     ManagedNode,
@@ -121,10 +127,16 @@ class ScalingService:
                     cleanup_storage, cleanup_volume = seed_ref
             except Exception as exc:
                 LOG.warning("Failed reading attached seed ISO vmid=%s: %s", vm.vmid, exc)
-        try:
-            next_state = transition_state(current_state, EVENT_REQUEST_DELETE)
-        except Exception:
+        if not is_lifecycle_state(current_state):
+            LOG.warning(
+                "VM has unsupported lifecycle state during delete request vmid=%s state=%s; forcing %s",
+                vm.vmid,
+                current_state,
+                STATE_DELETING_VM,
+            )
             next_state = STATE_DELETING_VM
+        else:
+            next_state = transition_state(current_state, EVENT_REQUEST_DELETE)
         await self.context.set_vm_state(
             group,
             vm,

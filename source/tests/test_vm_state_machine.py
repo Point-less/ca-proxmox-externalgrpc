@@ -22,7 +22,6 @@ from core.vm_state_machine import (
     STATE_DELETING_ISO,
     STATE_DELETING_NODE,
     STATE_DELETING_VM,
-    STATE_FAILED,
     STATE_PENDING,
     is_delete_state,
     transition_state,
@@ -52,12 +51,10 @@ class VmStateMachineTests(unittest.TestCase):
     def test_request_delete_from_regular_states(self):
         self.assertEqual(transition_state(STATE_PENDING, EVENT_REQUEST_DELETE), STATE_DELETING_VM)
         self.assertEqual(transition_state(STATE_ACTIVE, EVENT_REQUEST_DELETE), STATE_DELETING_VM)
-        self.assertEqual(transition_state(STATE_FAILED, EVENT_REQUEST_DELETE), STATE_DELETING_VM)
 
     def test_infra_missing_transitions(self):
         self.assertEqual(transition_state(STATE_PENDING, EVENT_INFRA_MISSING), STATE_COMPLETED)
         self.assertEqual(transition_state(STATE_ACTIVE, EVENT_INFRA_MISSING), STATE_COMPLETED)
-        self.assertEqual(transition_state(STATE_FAILED, EVENT_INFRA_MISSING), STATE_COMPLETED)
         self.assertEqual(transition_state(STATE_DELETING_VM, EVENT_INFRA_MISSING), STATE_DELETING_ISO)
         self.assertEqual(transition_state(STATE_DELETING_ISO, EVENT_INFRA_MISSING), STATE_DELETING_ISO)
         self.assertEqual(transition_state(STATE_DELETING_NODE, EVENT_INFRA_MISSING), STATE_DELETING_NODE)

@@ -9,6 +9,7 @@ from core.models import GroupConfig, Settings, VMInfo
 from core.vm_state_machine import (
     STATE_ACTIVE,
     STATE_PENDING,
+    is_lifecycle_state,
 )
 from infra.utils import parse_tags, vmid_from_provider_id
 
@@ -57,7 +58,7 @@ class GroupContext:
 
     async def ensure_vm_state(self, group: GroupConfig, vm: VMInfo) -> str:
         record = await self.state.get_vm_state(vm.vmid)
-        if record is not None and record.group_id == group.id:
+        if record is not None and record.group_id == group.id and is_lifecycle_state(record.state):
             return record.state
 
         state = STATE_ACTIVE if vm.status == "running" else STATE_PENDING

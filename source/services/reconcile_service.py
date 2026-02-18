@@ -24,7 +24,6 @@ from core.vm_state_machine import (
     STATE_DELETING_ISO,
     STATE_DELETING_NODE,
     STATE_DELETING_VM,
-    STATE_FAILED,
     STATE_PENDING,
     is_delete_state,
     is_lifecycle_state,
@@ -102,7 +101,14 @@ class ReconcileService:
             if is_delete_state(state):
                 continue
 
-            if state == STATE_FAILED:
+            if state not in {STATE_ACTIVE, STATE_PENDING}:
+                LOG.warning(
+                    "VM has unsupported lifecycle state vmid=%s name=%s state=%s group=%s; requesting deletion",
+                    vm.vmid,
+                    vm.name,
+                    state,
+                    group.id,
+                )
                 await self.scaling.request_vm_deletion(group, vm)
                 continue
 
