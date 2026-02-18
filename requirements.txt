@@ -5,3 +5,5 @@ requests==2.32.5
 PyYAML==6.0.3
 Jinja2==3.1.6
 pycdlib==1.14.0
+SQLAlchemy==2.0.39
+aiosqlite==0.21.0

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
-from concurrent import futures
 from pathlib import Path
 
 import grpc
@@ -14,14 +14,20 @@ from .provider import CloudProvider
 from .settings import load_settings
 
 
-def serve(*, config_path: Path, bind: str, port: int) -> None:
+async def serve(*, config_path: Path, bind: str, port: int) -> None:
     settings = load_settings(config_path)
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
-    pb_grpc.add_CloudProviderServicer_to_server(CloudProvider(settings), server)
+    provider = CloudProvider(settings)
+    await provider.start()
+
+    server = grpc.aio.server()
+    pb_grpc.add_CloudProviderServicer_to_server(provider, server)
     server.add_insecure_port(f"{bind}:{port}")
     logging.getLogger("proxmox-ca-externalgrpc").info("Starting provider on %s:%s", bind, port)
-    server.start()
-    server.wait_for_termination()
+    await server.start()
+    try:
+        await server.wait_for_termination()
+    finally:
+        await provider.stop()
 
 
 def main() -> int:
@@ -36,7 +42,7 @@ def main() -> int:
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    serve(config_path=Path(args.config), bind=args.bind, port=args.port)
+    asyncio.run(serve(config_path=Path(args.config), bind=args.bind, port=args.port))
     return 0
 
 

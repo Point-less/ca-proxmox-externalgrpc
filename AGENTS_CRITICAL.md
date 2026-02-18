@@ -1,7 +1,6 @@
 # AGENTS_CRITICAL
 
-- Host: use only `docker`/`docker compose`/`git`.
-- App/tool commands: run inside the toolbox via `docker compose exec toolbox ...`.
-- Source is bind-mounted at `/app`; state/secrets at `/state`.
-- Do not commit secrets; keep them under `state/` or local `source/.env`.
-
+- After every user message, re-read `AGENTS_CRITICAL.md`.
+- Read `AGENTS.md` first, then `AGENTS_PROJECT.md` for repository-specific guidance.
+- Keep service code, scripts, and tests under `source/`; keep dependencies in root `requirements.txt`.
+- Never commit secrets, tokens, or private keys.
