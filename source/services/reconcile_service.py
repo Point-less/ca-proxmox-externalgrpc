@@ -2,16 +2,48 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
-from .contracts import KubernetesService, ProxmoxService, StateRepository
-from .group_context import GroupContext, STATE_ACTIVE, STATE_FAILED, STATE_PENDING
-from .models import GroupConfig, Settings, VMInfo
+import httpx
+
+from core.contracts import KubernetesService, ProxmoxService, StateRepository, VMStateRecord
+from core.models import GroupConfig, Settings, VMInfo
+from core.vm_state_machine import (
+    EVENT_BECAME_ACTIVE,
+    EVENT_BECAME_PENDING,
+    EVENT_INFRA_MISSING,
+    EVENT_ISO_DONE,
+    EVENT_ISO_RETRY,
+    EVENT_NODE_DONE,
+    EVENT_NODE_RETRY,
+    EVENT_VM_DONE,
+    EVENT_VM_RETRY,
+    STATE_ACTIVE,
+    STATE_COMPLETED,
+    STATE_DELETING_ISO,
+    STATE_DELETING_NODE,
+    STATE_DELETING_VM,
+    STATE_FAILED,
+    STATE_PENDING,
+    is_delete_state,
+    is_lifecycle_state,
+    transition_state,
+)
+from infra.seed import make_cidata_iso_bytes, render_seed, seed_iso_name
+from infra.utils import parse_tags
+from .group_context import GroupContext
 from .scaling_service import ScalingService
-from .seed import make_cidata_iso_bytes, render_seed, seed_iso_name
-from .utils import parse_tags
 
 LOG = logging.getLogger("proxmox-ca-externalgrpc")
+
+
+@dataclass(frozen=True)
+class DeleteStepOutcome:
+    event: str
+    last_error: str | None
+    cleanup_storage: str | None = None
+    cleanup_volume: str | None = None
 
 
 class ReconcileService:
@@ -35,11 +67,11 @@ class ReconcileService:
         self.pending_vm_timeout_seconds = max(120, int(pending_vm_timeout_seconds))
 
     async def bootstrap_group(self, group: GroupConfig) -> None:
-        vms = await self.context.group_vms(group)
-        keep_vmids = {vm.vmid for vm in vms}
-        await self.state.delete_missing_group_vm_states(group.id, keep_vmids)
+        group_vms = await self.context.group_vms(group)
+        await self._reconcile_missing_vm_records(group, {vm.vmid for vm in group_vms})
+
         managed_count = 0
-        for vm in vms:
+        for vm in group_vms:
             state = await self.context.ensure_vm_state(group, vm)
             if state in {STATE_ACTIVE, STATE_PENDING}:
                 managed_count += 1
@@ -54,19 +86,29 @@ class ReconcileService:
             kube_nodes = []
 
         group_vms = await self.context.group_vms(group)
-        keep_vmids = {vm.vmid for vm in group_vms}
-        await self.state.delete_missing_group_vm_states(group.id, keep_vmids)
+        vm_by_id = {vm.vmid: vm for vm in group_vms}
+
+        await self._reconcile_missing_vm_records(group, set(vm_by_id.keys()))
+
+        # Progress explicit delete state machine first.
+        for record in await self.state.list_group_vm_states(group.id):
+            if not is_delete_state(record.state):
+                continue
+            await self._progress_delete_state(group, record, vm_by_id.get(record.vmid))
 
         managed: list[tuple[VMInfo, str]] = []
         for vm in group_vms:
             state = await self.context.ensure_vm_state(group, vm)
+            if is_delete_state(state):
+                continue
+
             if state == STATE_FAILED:
-                await self._cleanup_failed_vm(group, vm)
+                await self.scaling.request_vm_deletion(group, vm)
                 continue
 
             if state == STATE_ACTIVE and vm.status != "running":
-                await self.context.set_vm_state(group, vm, state=STATE_PENDING, pending_since=now, last_error="vm not running")
-                state = STATE_PENDING
+                state = transition_state(state, EVENT_BECAME_PENDING)
+                await self.context.set_vm_state(group, vm, state=state, pending_since=now, last_error="vm not running")
 
             if state == STATE_PENDING:
                 pending_since = await self.context.vm_pending_since(vm.vmid)
@@ -76,8 +118,8 @@ class ReconcileService:
 
                 age_s = max(0, now - int(pending_since))
                 if vm.status == "running" and self._is_kube_node_ready_for_vm(group, vm, kube_nodes):
-                    await self.context.set_vm_state(group, vm, state=STATE_ACTIVE, pending_since=None, last_error=None)
-                    state = STATE_ACTIVE
+                    state = transition_state(state, EVENT_BECAME_ACTIVE)
+                    await self.context.set_vm_state(group, vm, state=state, pending_since=None, last_error=None)
                     LOG.info("Promoted VM to active vmid=%s name=%s group=%s", vm.vmid, vm.name, group.id)
                 elif age_s >= self.pending_vm_timeout_seconds:
                     LOG.warning(
@@ -88,7 +130,7 @@ class ReconcileService:
                         age_s,
                         self.pending_vm_timeout_seconds,
                     )
-                    await self._delete_vm(vm)
+                    await self.scaling.request_vm_deletion(group, vm)
                     continue
 
             if state in {STATE_ACTIVE, STATE_PENDING}:
@@ -111,12 +153,139 @@ class ReconcileService:
         elif len(managed) > desired:
             await self.scaling.shrink_to_desired(group, managed, desired)
 
-    async def _cleanup_failed_vm(self, group: GroupConfig, vm: VMInfo) -> None:
+    async def _progress_delete_state(self, group: GroupConfig, record: VMStateRecord, vm: VMInfo | None) -> None:
+        outcome = await self._run_delete_step(record, vm)
+        next_state = transition_state(record.state, outcome.event)
+        if next_state == STATE_COMPLETED:
+            await self.state.delete_vm_state(record.vmid)
+            return
+        await self._persist_delete_state(
+            group,
+            record,
+            state=next_state,
+            last_error=outcome.last_error,
+            cleanup_storage=outcome.cleanup_storage,
+            cleanup_volume=outcome.cleanup_volume,
+        )
+
+    async def _run_delete_step(self, record: VMStateRecord, vm: VMInfo | None) -> DeleteStepOutcome:
+        if record.state == STATE_DELETING_VM:
+            return await self._step_delete_vm(record, vm)
+        if record.state == STATE_DELETING_ISO:
+            return await self._step_delete_iso(record)
+        if record.state == STATE_DELETING_NODE:
+            return await self._step_delete_node(record)
+        return DeleteStepOutcome(event=EVENT_NODE_RETRY, last_error=f"unknown delete state: {record.state}")
+
+    async def _step_delete_vm(self, record: VMStateRecord, vm: VMInfo | None) -> DeleteStepOutcome:
+        cleanup_storage = record.cleanup_storage
+        cleanup_volume = record.cleanup_volume
+        if (not cleanup_storage or not cleanup_volume) and vm is not None:
+            try:
+                seed_ref = await self.proxmox.attached_seed_iso(record.vmid)
+                if seed_ref is not None:
+                    cleanup_storage, cleanup_volume = seed_ref
+            except Exception as exc:
+                LOG.warning("Failed reading attached seed ISO during delete vmid=%s: %s", record.vmid, exc)
+
+        if vm is not None:
+            try:
+                await self.proxmox.stop_and_delete_vm(record.vmid)
+            except Exception as exc:
+                return DeleteStepOutcome(
+                    event=EVENT_VM_RETRY,
+                    last_error=f"delete vm failed: {exc}",
+                    cleanup_storage=cleanup_storage,
+                    cleanup_volume=cleanup_volume,
+                )
+
+        return DeleteStepOutcome(
+            event=EVENT_VM_DONE,
+            last_error=None,
+            cleanup_storage=cleanup_storage,
+            cleanup_volume=cleanup_volume,
+        )
+
+    async def _step_delete_iso(self, record: VMStateRecord) -> DeleteStepOutcome:
+        storage = record.cleanup_storage
+        volume = record.cleanup_volume
+        if storage and volume:
+            try:
+                await self.proxmox.delete_storage_volume(storage, volume)
+            except httpx.HTTPStatusError as exc:
+                code = exc.response.status_code
+                if code != 404:
+                    return DeleteStepOutcome(
+                        event=EVENT_ISO_RETRY,
+                        last_error=f"delete iso failed: {exc}",
+                        cleanup_storage=storage,
+                        cleanup_volume=volume,
+                    )
+            except Exception as exc:
+                return DeleteStepOutcome(
+                    event=EVENT_ISO_RETRY,
+                    last_error=f"delete iso failed: {exc}",
+                    cleanup_storage=storage,
+                    cleanup_volume=volume,
+                )
+
+        return DeleteStepOutcome(
+            event=EVENT_ISO_DONE,
+            last_error=None,
+            cleanup_storage=storage,
+            cleanup_volume=volume,
+        )
+
+    async def _step_delete_node(self, record: VMStateRecord) -> DeleteStepOutcome:
         try:
-            await self._delete_vm(vm)
-            LOG.warning("Cleaned failed VM vmid=%s name=%s group=%s", vm.vmid, vm.name, group.id)
-        except Exception:
-            LOG.exception("Failed deleting failed-state VM vmid=%s group=%s", vm.vmid, group.id)
+            await self.kube.delete_node(record.vm_name)
+        except Exception as exc:
+            return DeleteStepOutcome(
+                event=EVENT_NODE_RETRY,
+                last_error=f"delete node failed: {exc}",
+                cleanup_storage=record.cleanup_storage,
+                cleanup_volume=record.cleanup_volume,
+            )
+        return DeleteStepOutcome(
+            event=EVENT_NODE_DONE,
+            last_error=None,
+            cleanup_storage=record.cleanup_storage,
+            cleanup_volume=record.cleanup_volume,
+        )
+
+    async def _persist_delete_state(
+        self,
+        group: GroupConfig,
+        record: VMStateRecord,
+        *,
+        state: str,
+        last_error: str | None,
+        cleanup_storage: str | None = None,
+        cleanup_volume: str | None = None,
+    ) -> None:
+        await self.state.upsert_vm_state(
+            vmid=record.vmid,
+            group_id=group.id,
+            vm_name=record.vm_name,
+            state=state,
+            pending_since=None,
+            last_error=last_error,
+            cleanup_storage=record.cleanup_storage if cleanup_storage is None else cleanup_storage,
+            cleanup_volume=record.cleanup_volume if cleanup_volume is None else cleanup_volume,
+        )
+
+    async def _reconcile_missing_vm_records(self, group: GroupConfig, existing_vmids: set[int]) -> None:
+        for record in await self.state.list_group_vm_states(group.id):
+            if record.vmid in existing_vmids:
+                continue
+            if not is_lifecycle_state(record.state):
+                await self.state.delete_vm_state(record.vmid)
+                continue
+            next_state = transition_state(record.state, EVENT_INFRA_MISSING)
+            if next_state == STATE_COMPLETED:
+                await self.state.delete_vm_state(record.vmid)
+                continue
+            await self._persist_delete_state(group, record, state=next_state, last_error=None)
 
     async def _create_vm(self, group: GroupConfig) -> VMInfo:
         vmid = await self.proxmox.nextid()
@@ -153,11 +322,6 @@ class ReconcileService:
         )
         LOG.info("Created VM vmid=%s name=%s group=%s", vmid, vm_name, group.id)
         return VMInfo(vmid=vmid, name=vm_name, status="running", tags=parse_tags(tags))
-
-    async def _delete_vm(self, vm: VMInfo) -> None:
-        await self.proxmox.stop_and_delete(vm.vmid)
-        await self.state.delete_vm_state(vm.vmid)
-        await self.kube.delete_node(vm.name)
 
     def _is_node_ready(self, item: dict[str, Any]) -> bool:
         status = item.get("status") if isinstance(item, dict) else {}

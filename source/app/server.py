@@ -9,9 +9,9 @@ from pathlib import Path
 
 import grpc
 
-from .proto_stubs import pb_grpc
+from infra.proto_stubs import pb_grpc
+from infra.settings import load_settings
 from .provider import CloudProvider
-from .settings import load_settings
 
 
 async def serve(*, config_path: Path, bind: str, port: int) -> None:

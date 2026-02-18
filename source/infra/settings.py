@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from .models import GroupConfig, K3sConfig, ProxmoxConfig, Settings
+from core.models import GroupConfig, K3sConfig, ProxmoxConfig, Settings
 from .utils import as_bool, normalize_pm_api_base, read_optional
 
 

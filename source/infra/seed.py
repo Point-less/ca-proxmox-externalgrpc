@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import io
-from pathlib import Path
-
 import pycdlib
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from .models import K3sConfig
+from core.models import K3sConfig
 
-BASE_DIR = Path(__file__).resolve().parent
+from pathlib import Path
+
+SOURCE_DIR = Path(__file__).resolve().parents[1]
 
 
 def render_seed(*, k3s: K3sConfig, hostname: str, node_labels: list[str], node_taints: list[str]) -> tuple[str, str]:
     env = Environment(
-        loader=FileSystemLoader(str(BASE_DIR / "cidata")),
+        loader=FileSystemLoader(str(SOURCE_DIR / "cidata")),
         undefined=StrictUndefined,
         autoescape=False,
         keep_trailing_newline=True,

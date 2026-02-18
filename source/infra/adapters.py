@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import urllib.parse
+import ssl
 from pathlib import Path
 from typing import Any
 
-import requests
+import httpx
 
 from .pve import PveClient
 from .utils import unwrap_k8s_protobuf
@@ -19,21 +19,23 @@ class AsyncProxmoxAdapter:
     def __init__(self, client: PveClient):
         self._client = client
 
+    async def close(self) -> None:
+        await self._client.close()
+
     async def list_vms(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._client.list_vms)
+        return await self._client.list_vms()
 
     async def vm_config(self, vmid: int) -> dict[str, Any]:
-        return await asyncio.to_thread(self._client.vm_config, int(vmid))
+        return await self._client.vm_config(int(vmid))
 
     async def nextid(self) -> int:
-        return await asyncio.to_thread(self._client.nextid)
+        return await self._client.nextid()
 
     async def iso_exists(self, iso_name: str) -> bool:
-        return await asyncio.to_thread(self._client.iso_exists, str(iso_name))
+        return await self._client.iso_exists(str(iso_name))
 
     async def upload(self, *, storage: str, filename: str, content: str, file_bytes: bytes) -> Any:
-        return await asyncio.to_thread(
-            self._client.upload,
+        return await self._client.upload(
             storage=storage,
             filename=filename,
             content=content,
@@ -52,8 +54,7 @@ class AsyncProxmoxAdapter:
         tags: str,
         iso_name: str,
     ) -> int:
-        return await asyncio.to_thread(
-            self._client.create_vm_from_image,
+        return await self._client.create_vm_from_image(
             vmid=vmid,
             name=name,
             cores=cores,
@@ -64,13 +65,27 @@ class AsyncProxmoxAdapter:
             iso_name=iso_name,
         )
 
-    async def stop_and_delete(self, vmid: int) -> None:
-        await asyncio.to_thread(self._client.stop_and_delete, int(vmid))
+    async def attached_seed_iso(self, vmid: int) -> tuple[str, str] | None:
+        return await self._client.attached_seed_iso(int(vmid))
+
+    async def stop_and_delete_vm(self, vmid: int) -> None:
+        await self._client.stop_and_delete_vm(int(vmid))
+
+    async def delete_storage_volume(self, storage: str, volume: str) -> None:
+        await self._client.delete_storage_volume(str(storage), str(volume))
 
 
 class AsyncKubernetesAdapter:
-    def __init__(self, session: requests.Session | None = None):
-        self._session = session or requests.Session()
+    def __init__(self, client: httpx.AsyncClient | None = None):
+        self._client = client
+        self._owns_client = client is None
+
+    async def close(self) -> None:
+        if self._client is None:
+            return
+        if self._owns_client:
+            await self._client.aclose()
+        self._client = None
 
     def _headers(self, *, accept: str, content_type: str | None = None) -> dict[str, str]:
         if not SA_TOKEN_PATH.exists():
@@ -86,7 +101,7 @@ class AsyncKubernetesAdapter:
             headers["Content-Type"] = content_type
         return headers
 
-    def _request_sync(
+    async def _request(
         self,
         method: str,
         path: str,
@@ -95,23 +110,24 @@ class AsyncKubernetesAdapter:
         content_type: str | None = None,
         data: Any | None = None,
         json_body: Any | None = None,
-    ) -> requests.Response:
+    ) -> httpx.Response:
         if not SA_CA_CRT_PATH.exists():
             raise RuntimeError(f"Missing service account CA certificate: {SA_CA_CRT_PATH}")
-        resp = self._session.request(
+        if self._client is None:
+            ssl_ctx = ssl.create_default_context(cafile=str(SA_CA_CRT_PATH))
+            self._client = httpx.AsyncClient(timeout=20, verify=ssl_ctx)
+        response = await self._client.request(
             method=method.upper(),
             url=f"{INCLUSTER_API_URL}{path}",
             headers=self._headers(accept=accept, content_type=content_type),
             data=data,
             json=json_body,
-            verify=str(SA_CA_CRT_PATH),
-            timeout=20,
         )
-        resp.raise_for_status()
-        return resp
+        response.raise_for_status()
+        return response
 
     async def list_nodes(self) -> list[dict[str, Any]]:
-        response = await asyncio.to_thread(self._request_sync, "GET", "/api/v1/nodes")
+        response = await self._request("GET", "/api/v1/nodes")
         payload = response.json() if response.content else {}
         if not isinstance(payload, dict):
             return []
@@ -123,10 +139,9 @@ class AsyncKubernetesAdapter:
             return
         node_path = f"/api/v1/nodes/{urllib.parse.quote(node_name, safe='')}"
         try:
-            await asyncio.to_thread(self._request_sync, "DELETE", node_path)
-        except requests.HTTPError as exc:
-            code = exc.response.status_code if exc.response is not None else None
-            if code == 404:
+            await self._request("DELETE", node_path)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
                 return
             raise
 
@@ -134,13 +149,12 @@ class AsyncKubernetesAdapter:
         if not node_name:
             return {}
         node_path = f"/api/v1/nodes/{urllib.parse.quote(node_name, safe='')}"
-        response = await asyncio.to_thread(self._request_sync, "GET", node_path)
+        response = await self._request("GET", node_path)
         payload = response.json() if response.content else {}
         return payload if isinstance(payload, dict) else {}
 
     async def build_template_node_bytes(self, payload: dict[str, Any]) -> bytes:
-        response = await asyncio.to_thread(
-            self._request_sync,
+        response = await self._request(
             "POST",
             "/api/v1/nodes?dryRun=All",
             accept="application/vnd.kubernetes.protobuf",

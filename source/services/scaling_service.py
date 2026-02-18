@@ -3,10 +3,14 @@ from __future__ import annotations
 import logging
 from typing import Iterable
 
-from .contracts import KubernetesService, StateRepository
-from .errors import FailedPreconditionError, InvalidArgumentError, NotFoundError
-from .group_context import GroupContext, ManagedNode, STATE_PENDING
-from .models import GroupConfig, Settings, VMInfo
+from core.contracts import StateRepository
+from core.errors import FailedPreconditionError, InvalidArgumentError, NotFoundError
+from core.models import GroupConfig, Settings, VMInfo
+from core.vm_state_machine import EVENT_REQUEST_DELETE, STATE_DELETING_VM, STATE_PENDING, transition_state
+from .group_context import (
+    GroupContext,
+    ManagedNode,
+)
 
 LOG = logging.getLogger("proxmox-ca-externalgrpc")
 
@@ -17,12 +21,10 @@ class ScalingService:
         *,
         settings: Settings,
         context: GroupContext,
-        kube: KubernetesService,
         state: StateRepository,
     ):
         self.settings = settings
         self.context = context
-        self.kube = kube
         self.state = state
 
     async def ensure_desired_size_initialized(self, group: GroupConfig, observed_size: int | None = None) -> int:
@@ -84,7 +86,7 @@ class ScalingService:
             vm = await self.context.find_vm_for_node(group, node)
             if vm is None:
                 raise NotFoundError(f"node not in group {group.id}: {node.name} {node.provider_id}")
-            await self._delete_vm(vm)
+            await self.request_vm_deletion(group, vm)
             deleted += 1
         desired = await self.ensure_desired_size_initialized(group)
         await self.state.set_desired_size(group.id, max(group.min_size, desired - deleted))
@@ -99,10 +101,36 @@ class ScalingService:
         remove_count = len(candidates) - desired
         ordered = sorted(candidates, key=lambda item: (0 if item[1] == STATE_PENDING else 1, -item[0].vmid))
         for vm, _state in ordered[:remove_count]:
-            await self._delete_vm(vm)
+            await self.request_vm_deletion(group, vm)
 
-    async def _delete_vm(self, vm: VMInfo) -> None:
-        await self.context.proxmox.stop_and_delete(vm.vmid)
-        await self.state.delete_vm_state(vm.vmid)
-        await self.kube.delete_node(vm.name)
-        LOG.info("Deleted VM vmid=%s name=%s", vm.vmid, vm.name)
+    async def request_vm_deletion(self, group: GroupConfig, vm: VMInfo) -> None:
+        current_state: str
+        cleanup_storage: str | None = None
+        cleanup_volume: str | None = None
+        record = await self.state.get_vm_state(vm.vmid)
+        if record is not None:
+            current_state = record.state
+            cleanup_storage = record.cleanup_storage
+            cleanup_volume = record.cleanup_volume
+        else:
+            current_state = await self.context.ensure_vm_state(group, vm)
+        if not cleanup_storage or not cleanup_volume:
+            try:
+                seed_ref = await self.context.proxmox.attached_seed_iso(vm.vmid)
+                if seed_ref is not None:
+                    cleanup_storage, cleanup_volume = seed_ref
+            except Exception as exc:
+                LOG.warning("Failed reading attached seed ISO vmid=%s: %s", vm.vmid, exc)
+        try:
+            next_state = transition_state(current_state, EVENT_REQUEST_DELETE)
+        except Exception:
+            next_state = STATE_DELETING_VM
+        await self.context.set_vm_state(
+            group,
+            vm,
+            state=next_state,
+            pending_since=None,
+            last_error=None,
+            cleanup_storage=cleanup_storage,
+            cleanup_volume=cleanup_volume,
+        )

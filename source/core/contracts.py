@@ -13,6 +13,8 @@ class VMStateRecord:
     pending_since: int | None
     updated_at: int
     last_error: str | None
+    cleanup_storage: str | None
+    cleanup_volume: str | None
 
 
 class StateRepository(Protocol):
@@ -27,13 +29,15 @@ class StateRepository(Protocol):
         state: str,
         pending_since: int | None,
         last_error: str | None = None,
+        cleanup_storage: str | None = None,
+        cleanup_volume: str | None = None,
     ) -> None: ...
 
     async def get_vm_state(self, vmid: int) -> VMStateRecord | None: ...
 
-    async def delete_vm_state(self, vmid: int) -> None: ...
+    async def list_group_vm_states(self, group_id: str) -> list[VMStateRecord]: ...
 
-    async def delete_missing_group_vm_states(self, group_id: str, keep_vmids: set[int]) -> int: ...
+    async def delete_vm_state(self, vmid: int) -> None: ...
 
     async def count_group_vm_states(self, group_id: str, states: set[str]) -> int: ...
 
@@ -68,7 +72,11 @@ class ProxmoxService(Protocol):
         iso_name: str,
     ) -> int: ...
 
-    async def stop_and_delete(self, vmid: int) -> None: ...
+    async def attached_seed_iso(self, vmid: int) -> tuple[str, str] | None: ...
+
+    async def stop_and_delete_vm(self, vmid: int) -> None: ...
+
+    async def delete_storage_volume(self, storage: str, volume: str) -> None: ...
 
 
 class KubernetesService(Protocol):

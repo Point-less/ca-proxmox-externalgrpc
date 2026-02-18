@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .contracts import KubernetesService
+from core.contracts import KubernetesService
+from core.models import GroupConfig
 from .group_context import GroupContext
-from .models import GroupConfig
 
 LOG = logging.getLogger("proxmox-ca-externalgrpc")
 

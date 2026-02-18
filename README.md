@@ -32,37 +32,23 @@ docker build -t proxmox-ca-externalgrpc:dev .
 
 The image build generates gRPC python files from `source/externalgrpc.proto`.
 
-## Local Dev
+## Execution Policy
 
-Regenerate protobuf stubs:
+- NEVER run this service directly on the host machine.
+- Run it only from the Docker image/container.
 
-```bash
-python source/scripts/generate-proto.py
-```
-
-Run tests:
+## Test (Container)
 
 ```bash
-python -m unittest discover -s source/tests -v
+docker run --rm --entrypoint python proxmox-ca-externalgrpc:dev -m unittest discover -s /app/tests -v
 ```
 
 ## Code Layout
 
-- `source/server.py`: thin entrypoint (arg parsing, logging, gRPC server bootstrap)
-- `source/provider.py`: async CloudProvider gRPC implementation
-- `source/orchestrator.py`: facade over scaling/reconcile/template services
-- `source/group_context.py`: shared VM/group discovery and state helpers
-- `source/scaling_service.py`: desired-size management and scale APIs
-- `source/reconcile_service.py`: VM lifecycle reconciliation loop
-- `source/template_service.py`: template-node payload generation
-- `source/state_store.py`: SQLAlchemy-backed SQLite state repository
-- `source/adapters.py`: async adapters for Proxmox and Kubernetes APIs
-- `source/pve.py`: Proxmox API client and VM lifecycle operations
-- `source/settings.py`: config loading + env override logic
-- `source/seed.py`: cloud-init rendering and seed ISO creation
-- `source/utils.py`: shared parsing/protobuf helpers
-- `source/models.py`: dataclasses for settings and VM/group state
-- `source/proto_stubs.py`: guarded import of generated protobuf modules
+- `source/app/`: service entrypoints and gRPC servicer (`server.py`, `provider.py`)
+- `source/services/`: orchestration and lifecycle services
+- `source/core/`: domain contracts, models, errors, lifecycle state machine
+- `source/infra/`: adapters, Proxmox client, settings loader, sqlite store, utility helpers
 - `source/scripts/generate-proto.py`: protobuf generation script
 - `source/tests/`: async architecture tests
 
@@ -90,7 +76,9 @@ Environment variables can override key settings:
 ## Run
 
 ```bash
-python -m source.server --config /config/provider-config.yaml --port 50051
+docker run --rm -p 50051:50051 \
+  -v /path/to/provider-config.yaml:/config/provider-config.yaml:ro \
+  proxmox-ca-externalgrpc:dev
 ```
 
 ## Notes
@@ -98,4 +86,5 @@ python -m source.server --config /config/provider-config.yaml --port 50051
 - This implementation is intentionally minimal.
 - It uses VM tags to map nodes to autoscaler groups (`ca-group-<group-id>`).
 - It uses SQLite-backed state for desired group size + VM lifecycle tracking.
+- VM lifecycle is modeled with `python-statemachine` transitions (`pending`, `active`, `failed`, `deleting_vm`, `deleting_iso`, `deleting_node`).
 - For reliable node mapping, keep hostnames unique and deterministic.

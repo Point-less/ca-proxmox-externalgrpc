@@ -8,8 +8,7 @@ from grpc_tools import protoc
 
 
 def main() -> int:
-    base_dir = Path(__file__).resolve().parents[2]
-    source_dir = base_dir / "source"
+    source_dir = Path(__file__).resolve().parents[1]
     include_dir = Path(grpc_tools.__file__).resolve().parent / "_proto"
     proto = source_dir / "externalgrpc.proto"
     if not proto.exists():

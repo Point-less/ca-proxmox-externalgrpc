@@ -3,16 +3,14 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from .contracts import ProxmoxService, StateRepository
-from .errors import GroupNotFoundError
-from .models import GroupConfig, Settings, VMInfo
-from .utils import parse_tags, vmid_from_provider_id
-
-STATE_PREFIX = "ca-state-"
-PENDING_TS_PREFIX = "ca-pending-ts-"
-STATE_PENDING = "pending"
-STATE_ACTIVE = "active"
-STATE_FAILED = "failed"
+from core.contracts import ProxmoxService, StateRepository
+from core.errors import GroupNotFoundError
+from core.models import GroupConfig, Settings, VMInfo
+from core.vm_state_machine import (
+    STATE_ACTIVE,
+    STATE_PENDING,
+)
+from infra.utils import parse_tags, vmid_from_provider_id
 
 
 @dataclass(frozen=True)
@@ -57,37 +55,13 @@ class GroupContext:
                 out.append(VMInfo(vmid=vmid, name=name, status=status, tags=tags))
         return sorted(out, key=lambda x: x.vmid)
 
-    def state_from_vm_tags(self, vm: VMInfo) -> str | None:
-        for tag in vm.tags:
-            if not tag.startswith(STATE_PREFIX):
-                continue
-            value = tag[len(STATE_PREFIX) :].strip().lower()
-            if value in {STATE_PENDING, STATE_ACTIVE, STATE_FAILED}:
-                return value
-        return None
-
-    def pending_since_from_vm_tags(self, vm: VMInfo) -> int | None:
-        for tag in vm.tags:
-            if not tag.startswith(PENDING_TS_PREFIX):
-                continue
-            raw = tag[len(PENDING_TS_PREFIX) :].strip()
-            try:
-                return int(raw)
-            except Exception:
-                continue
-        return None
-
     async def ensure_vm_state(self, group: GroupConfig, vm: VMInfo) -> str:
         record = await self.state.get_vm_state(vm.vmid)
         if record is not None and record.group_id == group.id:
             return record.state
 
-        state = self.state_from_vm_tags(vm)
-        pending_since = self.pending_since_from_vm_tags(vm)
-        if state is None:
-            state = STATE_ACTIVE if vm.status == "running" else STATE_PENDING
-        if state == STATE_PENDING and pending_since is None:
-            pending_since = int(time.time())
+        state = STATE_ACTIVE if vm.status == "running" else STATE_PENDING
+        pending_since = None if state == STATE_ACTIVE else int(time.time())
 
         await self.state.upsert_vm_state(
             vmid=vm.vmid,
@@ -106,6 +80,8 @@ class GroupContext:
         state: str,
         pending_since: int | None = None,
         last_error: str | None = None,
+        cleanup_storage: str | None = None,
+        cleanup_volume: str | None = None,
     ) -> None:
         await self.state.upsert_vm_state(
             vmid=vm.vmid,
@@ -114,6 +90,8 @@ class GroupContext:
             state=state,
             pending_since=pending_since,
             last_error=last_error,
+            cleanup_storage=cleanup_storage,
+            cleanup_volume=cleanup_volume,
         )
 
     async def vm_pending_since(self, vmid: int) -> int | None:

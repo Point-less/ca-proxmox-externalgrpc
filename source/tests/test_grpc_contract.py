@@ -1,63 +1,23 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import grpc
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(BASE_DIR))
-subprocess.run([sys.executable, str(BASE_DIR / "source" / "scripts" / "generate-proto.py")], check=True)
+from helpers import bootstrap_tests, make_group, make_settings
 
-from source.models import GroupConfig, K3sConfig, ProxmoxConfig, Settings, VMInfo  # noqa: E402
-from source.orchestrator import FailedPreconditionError, GroupNotFoundError, InvalidArgumentError, NotFoundError  # noqa: E402
-from source.provider import CloudProvider  # noqa: E402
-from source.proto_stubs import pb, pb_grpc  # noqa: E402
+bootstrap_tests()
 
-
-def _settings(groups: dict[str, GroupConfig]) -> Settings:
-    return Settings(
-        proxmox=ProxmoxConfig(
-            api_url="https://pm.example.invalid",
-            node="pve",
-            token_id="tokenid",
-            token_secret="tokensecret",
-            tls_insecure=True,
-            import_storage="local",
-            iso_storage="local",
-            vm_storage="local-lvm",
-            bridge="vmbr0",
-            cloud_image_url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
-            verify_certificates=False,
-        ),
-        k3s=K3sConfig(
-            version="v1.34.4+k3s1",
-            server_url="https://10.0.0.1:6443",
-            cluster_token="token",
-            ssh_public_key="ssh-ed25519 AAAA",
-            registries_yaml="",
-        ),
-        vm_tag_prefix="proxmox_test2",
-        groups=groups,
-    )
-
-
-def _group(group_id: str) -> GroupConfig:
-    return GroupConfig(
-        id=group_id,
-        vm_name_prefix=f"ca-{group_id}",
-        min_size=0,
-        max_size=5,
-        cores=2,
-        memory_mb=4096,
-        balloon_mb=2048,
-        disk_size="20G",
-        labels=[],
-        taints=[],
-    )
+from app.provider import CloudProvider  # noqa: E402
+from core.models import VMInfo  # noqa: E402
+from infra.proto_stubs import pb, pb_grpc  # noqa: E402
+from services.orchestrator import (  # noqa: E402
+    FailedPreconditionError,
+    GroupNotFoundError,
+    InvalidArgumentError,
+    NotFoundError,
+)
 
 
 class _FakeOrchestrator:
@@ -116,9 +76,9 @@ class _FakeOrchestrator:
 
 class GrpcContractTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.groups = {"general": _group("general")}
-        self.settings = _settings(self.groups)
-        self.patcher = patch("source.provider.ProvisioningOrchestrator", _FakeOrchestrator)
+        self.groups = {"general": make_group("general")}
+        self.settings = make_settings(self.groups)
+        self.patcher = patch("app.provider.ProvisioningOrchestrator", _FakeOrchestrator)
         self.patcher.start()
 
         self.servicer = CloudProvider(self.settings)

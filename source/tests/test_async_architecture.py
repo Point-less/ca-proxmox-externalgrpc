@@ -1,28 +1,28 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(BASE_DIR))
-subprocess.run([sys.executable, str(BASE_DIR / "source" / "scripts" / "generate-proto.py")], check=True)
+from helpers import bootstrap_tests, make_group, make_settings
 
-from source.group_context import ManagedNode, STATE_ACTIVE, STATE_PENDING  # noqa: E402
-from source.models import GroupConfig, K3sConfig, ProxmoxConfig, Settings  # noqa: E402
-from source.orchestrator import ProvisioningOrchestrator  # noqa: E402
-from source.state_store import StateStore  # noqa: E402
-from source.utils import parse_tags  # noqa: E402
+bootstrap_tests()
+
+from core.vm_state_machine import STATE_ACTIVE, STATE_PENDING  # noqa: E402
+from infra.state_store import StateStore  # noqa: E402
+from infra.utils import parse_tags  # noqa: E402
+from services.group_context import ManagedNode  # noqa: E402
+from services.orchestrator import ProvisioningOrchestrator  # noqa: E402
 
 
 class _FakeProxmox:
     def __init__(self):
         self.vms: list[dict[str, Any]] = []
         self.cfgs: dict[int, dict[str, Any]] = {}
-        self.deleted: list[int] = []
+        self.seed_ref: dict[int, tuple[str, str]] = {}
+        self.deleted_vm: list[int] = []
+        self.deleted_volumes: list[tuple[str, str]] = []
         self.next_vmid = 100
 
     async def list_vms(self) -> list[dict[str, Any]]:
@@ -54,11 +54,18 @@ class _FakeProxmox:
         iso_name: str,
     ) -> int:
         self.vms.append({"vmid": vmid, "name": name, "status": "running", "tags": tags})
+        self.seed_ref[vmid] = ("local", f"iso/{iso_name}")
         return vmid
 
-    async def stop_and_delete(self, vmid: int) -> None:
-        self.deleted.append(vmid)
+    async def attached_seed_iso(self, vmid: int) -> tuple[str, str] | None:
+        return self.seed_ref.get(vmid)
+
+    async def stop_and_delete_vm(self, vmid: int) -> None:
+        self.deleted_vm.append(vmid)
         self.vms = [vm for vm in self.vms if int(vm.get("vmid")) != int(vmid)]
+
+    async def delete_storage_volume(self, storage: str, volume: str) -> None:
+        self.deleted_volumes.append((storage, volume))
 
 
 class _FakeKube:
@@ -83,48 +90,6 @@ class _FakeKube:
         return b"k8s\x00dummy"
 
 
-def _settings(groups: dict[str, GroupConfig]) -> Settings:
-    return Settings(
-        proxmox=ProxmoxConfig(
-            api_url="https://pm.example.invalid",
-            node="pve",
-            token_id="tokenid",
-            token_secret="tokensecret",
-            tls_insecure=True,
-            import_storage="local",
-            iso_storage="local",
-            vm_storage="local-lvm",
-            bridge="vmbr0",
-            cloud_image_url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
-            verify_certificates=False,
-        ),
-        k3s=K3sConfig(
-            version="v1.34.4+k3s1",
-            server_url="https://10.0.0.1:6443",
-            cluster_token="token",
-            ssh_public_key="ssh-ed25519 AAAA",
-            registries_yaml="",
-        ),
-        vm_tag_prefix="proxmox_test2",
-        groups=groups,
-    )
-
-
-def _group(group_id: str) -> GroupConfig:
-    return GroupConfig(
-        id=group_id,
-        vm_name_prefix=f"ca-{group_id}",
-        min_size=0,
-        max_size=5,
-        cores=2,
-        memory_mb=4096,
-        balloon_mb=2048,
-        disk_size="20G",
-        labels=[],
-        taints=[],
-    )
-
-
 class AsyncArchitectureTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -133,9 +98,9 @@ class AsyncArchitectureTests(unittest.IsolatedAsyncioTestCase):
         await self.state.init()
         self.proxmox = _FakeProxmox()
         self.kube = _FakeKube()
-        self.group = _group("general")
+        self.group = make_group("general")
         self.orch = ProvisioningOrchestrator(
-            settings=_settings({"general": self.group}),
+            settings=make_settings({"general": self.group}),
             proxmox=self.proxmox,
             kube=self.kube,
             state=self.state,
@@ -187,12 +152,13 @@ class AsyncArchitectureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.state, STATE_ACTIVE)
 
     async def test_delete_nodes_reduces_desired_size(self):
-        await self.orch.start()
         await self.state.set_desired_size("general", 2)
         self.proxmox.vms = [
             {"vmid": 101, "name": "ca-general-101", "status": "running", "tags": "ca-group-general"},
             {"vmid": 102, "name": "ca-general-102", "status": "running", "tags": "ca-group-general"},
         ]
+        self.proxmox.seed_ref[101] = ("local", "iso/seed-ca-general-101-abc123def456.iso")
+        self.proxmox.seed_ref[102] = ("local", "iso/seed-ca-general-102-abc123def456.iso")
         await self.state.upsert_vm_state(vmid=101, group_id="general", vm_name="ca-general-101", state=STATE_ACTIVE, pending_since=None)
         await self.state.upsert_vm_state(vmid=102, group_id="general", vm_name="ca-general-102", state=STATE_ACTIVE, pending_since=None)
 
@@ -203,7 +169,25 @@ class AsyncArchitectureTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(await self.orch.node_group_target_size("general"), 1)
-        self.assertEqual(self.proxmox.deleted, [101])
+        delete_state = await self.state.get_vm_state(101)
+        self.assertIsNotNone(delete_state)
+        self.assertEqual(delete_state.state, "deleting_vm")
+
+        await self.orch.reconcile.reconcile_group(self.group)
+        delete_state = await self.state.get_vm_state(101)
+        self.assertIsNotNone(delete_state)
+        self.assertEqual(delete_state.state, "deleting_iso")
+        self.assertEqual(self.proxmox.deleted_vm, [101])
+
+        await self.orch.reconcile.reconcile_group(self.group)
+        delete_state = await self.state.get_vm_state(101)
+        self.assertIsNotNone(delete_state)
+        self.assertEqual(delete_state.state, "deleting_node")
+        self.assertEqual(self.proxmox.deleted_volumes, [("local", "iso/seed-ca-general-101-abc123def456.iso")])
+
+        await self.orch.reconcile.reconcile_group(self.group)
+        self.assertIsNone(await self.state.get_vm_state(101))
+        self.assertIn("ca-general-101", self.kube.deleted)
 
     async def test_target_size_not_counting_vm_health(self):
         await self.orch.start()

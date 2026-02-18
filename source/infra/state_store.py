@@ -7,8 +7,9 @@ from sqlalchemy import Integer, String, Text, and_, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql import text
 
-from .contracts import VMStateRecord
+from core.contracts import VMStateRecord
 
 
 class Base(DeclarativeBase):
@@ -25,6 +26,8 @@ class VmStateRow(Base):
     pending_since: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[int] = mapped_column(Integer, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cleanup_storage: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cleanup_volume: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class GroupSizeRow(Base):
@@ -43,11 +46,33 @@ class StateStore:
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False, class_=AsyncSession)
         self._initialized = False
 
+    def _to_record(self, row: VmStateRow) -> VMStateRecord:
+        return VMStateRecord(
+            vmid=int(row.vmid),
+            group_id=str(row.group_id),
+            vm_name=str(row.vm_name),
+            state=str(row.state),
+            pending_since=(int(row.pending_since) if row.pending_since is not None else None),
+            updated_at=int(row.updated_at),
+            last_error=(str(row.last_error) if row.last_error is not None else None),
+            cleanup_storage=(str(row.cleanup_storage) if row.cleanup_storage is not None else None),
+            cleanup_volume=(str(row.cleanup_volume) if row.cleanup_volume is not None else None),
+        )
+
     async def init(self) -> None:
         if self._initialized:
             return
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            cols = {
+                str(row[1])
+                for row in (await conn.execute(text("PRAGMA table_info(vm_states)"))).fetchall()
+                if len(row) >= 2
+            }
+            if "cleanup_storage" not in cols:
+                await conn.execute(text("ALTER TABLE vm_states ADD COLUMN cleanup_storage VARCHAR(255)"))
+            if "cleanup_volume" not in cols:
+                await conn.execute(text("ALTER TABLE vm_states ADD COLUMN cleanup_volume TEXT"))
         self._initialized = True
 
     async def upsert_vm_state(
@@ -59,6 +84,8 @@ class StateStore:
         state: str,
         pending_since: int | None,
         last_error: str | None = None,
+        cleanup_storage: str | None = None,
+        cleanup_volume: str | None = None,
     ) -> None:
         now = int(time.time())
         async with self._sessions() as session, session.begin():
@@ -70,6 +97,8 @@ class StateStore:
                 pending_since=pending_since,
                 updated_at=now,
                 last_error=last_error,
+                cleanup_storage=cleanup_storage,
+                cleanup_volume=cleanup_volume,
             )
             stmt = stmt.on_conflict_do_update(
                 index_elements=[VmStateRow.vmid],
@@ -80,6 +109,8 @@ class StateStore:
                     "pending_since": pending_since,
                     "updated_at": now,
                     "last_error": last_error,
+                    "cleanup_storage": cleanup_storage,
+                    "cleanup_volume": cleanup_volume,
                 },
             )
             await session.execute(stmt)
@@ -89,32 +120,20 @@ class StateStore:
             row = await session.get(VmStateRow, int(vmid))
             if row is None:
                 return None
-            return VMStateRecord(
-                vmid=int(row.vmid),
-                group_id=str(row.group_id),
-                vm_name=str(row.vm_name),
-                state=str(row.state),
-                pending_since=(int(row.pending_since) if row.pending_since is not None else None),
-                updated_at=int(row.updated_at),
-                last_error=(str(row.last_error) if row.last_error is not None else None),
-            )
+            return self._to_record(row)
+
+    async def list_group_vm_states(self, group_id: str) -> list[VMStateRecord]:
+        async with self._sessions() as session:
+            rows = (
+                await session.execute(select(VmStateRow).where(VmStateRow.group_id == str(group_id)).order_by(VmStateRow.vmid))
+            ).scalars()
+            return [self._to_record(row) for row in rows]
 
     async def delete_vm_state(self, vmid: int) -> None:
         async with self._sessions() as session, session.begin():
             row = await session.get(VmStateRow, int(vmid))
             if row is not None:
                 await session.delete(row)
-
-    async def delete_missing_group_vm_states(self, group_id: str, keep_vmids: set[int]) -> int:
-        async with self._sessions() as session, session.begin():
-            rows = (await session.execute(select(VmStateRow).where(VmStateRow.group_id == str(group_id)))).scalars()
-            deleted = 0
-            for row in rows:
-                if int(row.vmid) in keep_vmids:
-                    continue
-                await session.delete(row)
-                deleted += 1
-            return deleted
 
     async def count_group_vm_states(self, group_id: str, states: set[str]) -> int:
         if not states:

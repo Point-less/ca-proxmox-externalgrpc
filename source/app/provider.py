@@ -3,25 +3,23 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from typing import Awaitable, Callable, TypeVar
 
 import grpc
-import requests
 
-from .adapters import AsyncKubernetesAdapter, AsyncProxmoxAdapter
-from .models import GroupConfig, Settings
-from .orchestrator import (
-    FailedPreconditionError,
-    GroupNotFoundError,
-    InvalidArgumentError,
+from core.errors import FailedPreconditionError, GroupNotFoundError, InvalidArgumentError, NotFoundError
+from core.models import GroupConfig, Settings
+from infra.adapters import AsyncKubernetesAdapter, AsyncProxmoxAdapter
+from infra.proto_stubs import pb, pb_grpc
+from infra.pve import PveClient
+from infra.state_store import StateStore
+from services.orchestrator import (
     ManagedNode,
-    NotFoundError,
     ProvisioningOrchestrator,
 )
-from .proto_stubs import pb, pb_grpc
-from .pve import PveClient
-from .state_store import StateStore
 
 LOG = logging.getLogger("proxmox-ca-externalgrpc")
+_T = TypeVar("_T")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -38,10 +36,12 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
         reconcile_interval_seconds = max(5, _env_int("RECONCILE_INTERVAL_SECONDS", 20))
 
         self.settings = settings
+        self.proxmox = AsyncProxmoxAdapter(PveClient(settings.proxmox))
+        self.kube = AsyncKubernetesAdapter()
         self.orchestrator = ProvisioningOrchestrator(
             settings=settings,
-            proxmox=AsyncProxmoxAdapter(PveClient(settings.proxmox)),
-            kube=AsyncKubernetesAdapter(requests.Session()),
+            proxmox=self.proxmox,
+            kube=self.kube,
             state=StateStore(state_db_path),
             pending_vm_timeout_seconds=pending_vm_timeout_seconds,
             reconcile_interval_seconds=reconcile_interval_seconds,
@@ -52,9 +52,10 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
 
     async def stop(self) -> None:
         stop = getattr(self.orchestrator, "stop", None)
-        if stop is None:
-            return
-        await stop()
+        if stop is not None:
+            await stop()
+        await self.kube.close()
+        await self.proxmox.close()
 
     async def _group(self, group_id: str, context: grpc.ServicerContext) -> GroupConfig:
         group = self.settings.groups.get(group_id)
@@ -73,6 +74,20 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
             await context.abort(grpc.StatusCode.NOT_FOUND, str(exc))
         await context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
 
+    def _managed_node(self, node: pb.ExternalGrpcNode) -> ManagedNode:
+        return ManagedNode(
+            provider_id=str(node.providerID or ""),
+            name=str(node.name or ""),
+            labels={str(k): str(v) for k, v in dict(node.labels or {}).items()},
+        )
+
+    async def _call_or_abort(self, context: grpc.ServicerContext, fn: Callable[[], Awaitable[_T]]) -> _T:
+        try:
+            return await fn()
+        except Exception as exc:
+            await self._map_error(context, exc)
+            raise AssertionError("unreachable")
+
     async def NodeGroups(self, request: pb.NodeGroupsRequest, context: grpc.ServicerContext) -> pb.NodeGroupsResponse:
         groups = [
             pb.NodeGroup(
@@ -88,19 +103,15 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
     async def NodeGroupForNode(
         self, request: pb.NodeGroupForNodeRequest, context: grpc.ServicerContext
     ) -> pb.NodeGroupForNodeResponse:
-        node = ManagedNode(
-            provider_id=str(request.node.providerID or ""),
-            name=str(request.node.name or ""),
-            labels={str(k): str(v) for k, v in dict(request.node.labels or {}).items()},
+        group = await self._call_or_abort(
+            context,
+            lambda: self.orchestrator.node_group_for_node(self._managed_node(request.node)),
         )
-        try:
-            group = await self.orchestrator.node_group_for_node(node)
-        except Exception as exc:
-            await self._map_error(context, exc)
-            raise AssertionError("unreachable")
         if group is None:
             return pb.NodeGroupForNodeResponse(nodeGroup=pb.NodeGroup(id=""))
-        return pb.NodeGroupForNodeResponse(nodeGroup=pb.NodeGroup(id=group.id, minSize=group.min_size, maxSize=group.max_size))
+        return pb.NodeGroupForNodeResponse(
+            nodeGroup=pb.NodeGroup(id=group.id, minSize=group.min_size, maxSize=group.max_size)
+        )
 
     async def GPULabel(self, request: pb.GPULabelRequest, context: grpc.ServicerContext) -> pb.GPULabelResponse:
         return pb.GPULabelResponse(label="")
@@ -123,11 +134,7 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
         request: pb.NodeGroupTargetSizeRequest,
         context: grpc.ServicerContext,
     ) -> pb.NodeGroupTargetSizeResponse:
-        try:
-            target_size = int(await self.orchestrator.node_group_target_size(request.id))
-        except Exception as exc:
-            await self._map_error(context, exc)
-            raise AssertionError("unreachable")
+        target_size = int(await self._call_or_abort(context, lambda: self.orchestrator.node_group_target_size(request.id)))
         return pb.NodeGroupTargetSizeResponse(targetSize=target_size)
 
     async def NodeGroupIncreaseSize(
@@ -135,11 +142,7 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
         request: pb.NodeGroupIncreaseSizeRequest,
         context: grpc.ServicerContext,
     ) -> pb.NodeGroupIncreaseSizeResponse:
-        try:
-            await self.orchestrator.node_group_increase_size(request.id, int(request.delta))
-        except Exception as exc:
-            await self._map_error(context, exc)
-            raise AssertionError("unreachable")
+        await self._call_or_abort(context, lambda: self.orchestrator.node_group_increase_size(request.id, int(request.delta)))
         return pb.NodeGroupIncreaseSizeResponse()
 
     async def NodeGroupDeleteNodes(
@@ -147,19 +150,8 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
         request: pb.NodeGroupDeleteNodesRequest,
         context: grpc.ServicerContext,
     ) -> pb.NodeGroupDeleteNodesResponse:
-        nodes = [
-            ManagedNode(
-                provider_id=str(node.providerID or ""),
-                name=str(node.name or ""),
-                labels={str(k): str(v) for k, v in dict(node.labels or {}).items()},
-            )
-            for node in request.nodes
-        ]
-        try:
-            await self.orchestrator.node_group_delete_nodes(request.id, nodes)
-        except Exception as exc:
-            await self._map_error(context, exc)
-            raise AssertionError("unreachable")
+        nodes = [self._managed_node(node) for node in request.nodes]
+        await self._call_or_abort(context, lambda: self.orchestrator.node_group_delete_nodes(request.id, nodes))
         return pb.NodeGroupDeleteNodesResponse()
 
     async def NodeGroupDecreaseTargetSize(
@@ -167,21 +159,16 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
         request: pb.NodeGroupDecreaseTargetSizeRequest,
         context: grpc.ServicerContext,
     ) -> pb.NodeGroupDecreaseTargetSizeResponse:
-        try:
-            await self.orchestrator.node_group_decrease_target_size(request.id, int(request.delta))
-        except Exception as exc:
-            await self._map_error(context, exc)
-            raise AssertionError("unreachable")
+        await self._call_or_abort(
+            context,
+            lambda: self.orchestrator.node_group_decrease_target_size(request.id, int(request.delta)),
+        )
         return pb.NodeGroupDecreaseTargetSizeResponse()
 
     async def NodeGroupNodes(
         self, request: pb.NodeGroupNodesRequest, context: grpc.ServicerContext
     ) -> pb.NodeGroupNodesResponse:
-        try:
-            vms = await self.orchestrator.node_group_nodes(request.id)
-        except Exception as exc:
-            await self._map_error(context, exc)
-            raise AssertionError("unreachable")
+        vms = await self._call_or_abort(context, lambda: self.orchestrator.node_group_nodes(request.id))
         instances: list[pb.Instance] = []
         for vm in vms:
             state = pb.InstanceStatus.instanceRunning if vm.status == "running" else pb.InstanceStatus.unspecified
@@ -193,11 +180,7 @@ class CloudProvider(pb_grpc.CloudProviderServicer):
         request: pb.NodeGroupTemplateNodeInfoRequest,
         context: grpc.ServicerContext,
     ) -> pb.NodeGroupTemplateNodeInfoResponse:
-        try:
-            node_bytes = await self.orchestrator.node_group_template_node_bytes(request.id)
-        except Exception as exc:
-            await self._map_error(context, exc)
-            raise AssertionError("unreachable")
+        node_bytes = await self._call_or_abort(context, lambda: self.orchestrator.node_group_template_node_bytes(request.id))
         return pb.NodeGroupTemplateNodeInfoResponse(nodeBytes=node_bytes)
 
     async def NodeGroupGetOptions(

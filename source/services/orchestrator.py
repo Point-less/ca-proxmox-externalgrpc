@@ -4,10 +4,10 @@ import asyncio
 import logging
 from typing import Any
 
-from .contracts import KubernetesService, ProxmoxService, StateRepository
-from .errors import FailedPreconditionError, GroupNotFoundError, InvalidArgumentError, NotFoundError
+from core.contracts import KubernetesService, ProxmoxService, StateRepository
+from core.errors import FailedPreconditionError, GroupNotFoundError, InvalidArgumentError, NotFoundError
+from core.models import GroupConfig, Settings, VMInfo
 from .group_context import GroupContext, ManagedNode
-from .models import GroupConfig, Settings, VMInfo
 from .reconcile_service import ReconcileService
 from .scaling_service import ScalingService
 from .template_service import TemplateService
@@ -28,7 +28,7 @@ class ProvisioningOrchestrator:
     ):
         self.settings = settings
         self.context = GroupContext(settings=settings, proxmox=proxmox, state=state)
-        self.scaling = ScalingService(settings=settings, context=self.context, kube=kube, state=state)
+        self.scaling = ScalingService(settings=settings, context=self.context, state=state)
         self.reconcile = ReconcileService(
             settings=settings,
             context=self.context,
@@ -89,9 +89,6 @@ class ProvisioningOrchestrator:
             except Exception:
                 LOG.exception("Background reconcile loop failed")
             await asyncio.sleep(self.reconcile_interval_seconds)
-
-    async def node_groups(self) -> list[GroupConfig]:
-        return list(self.settings.groups.values())
 
     async def node_group_for_node(self, node: ManagedNode) -> GroupConfig | None:
         return await self.scaling.node_group_for_node(node)
